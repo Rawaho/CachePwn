@@ -105,8 +105,8 @@ namespace CachePwn
 
             Decrypt();
 
-
-            File.WriteAllBytes(Path.Combine(assetPath, "cache_test.bin"), payload);
+            Console.WriteLine("Saving chunks as cache.bin...");
+            File.WriteAllBytes(Path.Combine(assetPath, "cache.bin"), payload);
         }
 
         private static void Decrypt()

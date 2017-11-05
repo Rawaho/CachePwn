@@ -116,7 +116,7 @@ namespace CachePwn
         /// </summary>
         private void Round1(bool decrypt)
         {
-            Console.WriteLine($"Decryption Round 1 - Id:{ChunkHeader.Id}, Key:0x{ChunkHeader.Key1:X4},0x{ChunkHeader.Key2:X4},0x{ChunkHeader.Key3:X4}");
+            Console.WriteLine($"{(decrypt ? "Decryption" : "Encryption")} Round 1 - Id:{ChunkHeader.Id}, Key:0x{ChunkHeader.Key1:X4},0x{ChunkHeader.Key2:X4},0x{ChunkHeader.Key3:X4}");
 
             uint v7 = ChunkHeader.Key1;
             for (int i = 0; i < Payload.Length >> 2; i++)
@@ -143,7 +143,7 @@ namespace CachePwn
             uint key1 = round2DecryptionKeys.Key1;
             uint key2 = round2DecryptionKeys.Key2;
 
-            Console.WriteLine($"Decryption Round 2 - Id:{ChunkHeader.Id}, Key:0x{key1:X4},0x{key2:X4}");
+            Console.WriteLine($"{(decrypt ? "Decryption" : "Encryption")} Round 2 - Id:{ChunkHeader.Id}, Key:0x{key1:X4},0x{key2:X4}");
 
             for (int i = 0; i < Payload.Length >> 2; i++)
             {
