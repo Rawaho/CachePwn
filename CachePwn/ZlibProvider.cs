@@ -1,68 +1,38 @@
-﻿using System;
-using System.IO;
-using System.IO.Compression;
+﻿using System.IO;
+using Ionic.Zlib;
 
 namespace CachePwn
 {
     public static class ZlibProvider
     {
-        private enum CompressionSpeed : byte
+        public static byte[] Decompress(byte[] data)
         {
-            Fastest,
-            Fast,
-            Default,
-            Maximum
-        }
-
-        private enum CompressionMethod : byte
-        {
-            Deflate = 8
-        }
-
-        private const byte HeaderLength = 2;
-        private const byte Adler32Length = 4;
-
-        public static bool Deflate(byte[] data, out byte[] decompressed)
-        {
-            decompressed = new byte[0];
-            if (data.Length < HeaderLength + Adler32Length)
-                return false;
-
-            byte cmf = data[0];
-            if ((cmf & 0xF) != (byte)CompressionMethod.Deflate)
-                return false;
-
-            // byte cinfo = (byte)(cmf >> 4);
-
-            byte flg = data[1];
-            if ((cmf * 256 + flg) % 31 != 0)
-                return false;
-
-            // no support for dictonary
-            if ((flg & 0x20) != 0)
-                return false;
-
-            if (flg >> 6 != (byte)CompressionSpeed.Maximum)
-                return false;
-
-            // uint adler32 = BitConverter.ToUInt32(data, data.Length - Adler32Length);
-
-            byte[] deflateData = new byte[data.Length - (HeaderLength + Adler32Length)];
-            Buffer.BlockCopy(data, HeaderLength, deflateData, 0, data.Length - (HeaderLength + Adler32Length));
-
-            using (var compressedStream = new MemoryStream(deflateData))
+            using (MemoryStream compressedStream = new MemoryStream(data))
             {
-                using (var deflateStream = new DeflateStream(compressedStream, CompressionMode.Decompress))
+                using (var zlibStream = new ZlibStream(compressedStream, CompressionMode.Decompress))
                 {
-                    using (var outputStream = new MemoryStream())
+                    using (MemoryStream decompressedStream = new MemoryStream())
                     {
-                        deflateStream.CopyTo(outputStream);
-                        decompressed = outputStream.ToArray();
+                        zlibStream.CopyTo(decompressedStream);
+                        return decompressedStream.ToArray();
                     }
                 }
             }
+        }
 
-            return true;
+        public static byte[] Compress(byte[] data)
+        {
+            using (MemoryStream decompressedStream = new MemoryStream(data))
+            {
+                using (var zlibStream = new ZlibStream(decompressedStream, CompressionMode.Compress, CompressionLevel.BestCompression))
+                {
+                    using (MemoryStream compressedStream = new MemoryStream())
+                    {
+                        zlibStream.CopyTo(compressedStream);
+                        return compressedStream.ToArray();
+                    }
+                }
+            }
         }
     }
 }

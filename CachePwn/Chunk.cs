@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace CachePwn
 {
@@ -22,146 +24,158 @@ namespace CachePwn
             { 10u, (0x5F1FA913, 0xE345C74C) }  // server references this chunk but doesn't exist in cache.bin
         };
 
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct Header
         {
+            public uint Index { get; }
             public uint Id { get; }
-            public uint Id2 { get; } // ??
             public uint Key1 { get; }
             public uint Key2 { get; }
             public uint Key3 { get; }
-            public bool HasData { get; }
+            public byte HasData { get; }
 
             public Header(BinaryReader reader)
             {
+                Index   = reader.ReadUInt32();
                 Id      = reader.ReadUInt32();
-                Id2     = reader.ReadUInt32();
                 Key1    = reader.ReadUInt32();
                 Key2    = reader.ReadUInt32();
                 Key3    = reader.ReadUInt32();
-                HasData = reader.ReadByte() == 1;
+                HasData = reader.ReadByte();
+            }
+
+            public Header(ChunkKeyJson.ChunkKey chunkKey)
+            {
+                Index   = chunkKey.Id;
+                Id      = chunkKey.Id;
+                Key1    = chunkKey.Key1;
+                Key2    = chunkKey.Key2;
+                Key3    = chunkKey.Key3;
+                HasData = 1;
             }
         }
 
-        private readonly Header chunkHeader;
-        private byte[] payload;
+        public Header ChunkHeader { get; }
+        public byte[] Payload { get; private set; }
 
         public Chunk(BinaryReader reader)
         {
-            chunkHeader = new Header(reader);
-            Console.WriteLine($"New Chunk - Id:{chunkHeader.Id}");
+            ChunkHeader = new Header(reader);
+            Console.WriteLine($"New Chunk - Id:{ChunkHeader.Id}");
 
-            if (chunkHeader.HasData)
-            {
-                int compressedLength = reader.ReadInt32();
-                payload = reader.ReadBytes(compressedLength);
-            }
+            if (ChunkHeader.HasData != 1)
+                return;
+
+            int compressedLength = reader.ReadInt32();
+            Payload = reader.ReadBytes(compressedLength);
 
             // process chunk...
             uint decompressedPayloadSize = reader.ReadUInt32();
-            DeflateRound1(decompressedPayloadSize);
-            DecryptRound1();
-            DecryptRound2();
-            DeflateRound2();
+            Decompress(decompressedPayloadSize);
 
-            Console.WriteLine($"Saving chunk as {chunkHeader.Id:X4}.raw...");
-            File.WriteAllBytes($"{chunkHeader.Id:X4}.raw", payload);
+            Round1(true);
+            Round2(true);
+
+            decompressedPayloadSize = BitConverter.ToUInt32(Payload, 0);
+            Payload = Payload.Skip(sizeof(int)).ToArray();
+            Decompress(decompressedPayloadSize);
+
+            Console.WriteLine($"Saving chunk as {ChunkHeader.Id:X4}.raw...");
+            File.WriteAllBytes($"{ChunkHeader.Id:X4}.raw", Payload);
         }
 
-        private int Resize()
+        public Chunk(ChunkKeyJson.ChunkKey chunkKey, byte[] data)
         {
-            int old  = payload.Length;
-            int size = (int)(Math.Ceiling((double)payload.Length / sizeof(int)) * sizeof(int));
-            Array.Resize(ref payload, size);
+            ChunkHeader = new Header(chunkKey);
+            Console.WriteLine($"New Chunk - Id:{ChunkHeader.Id}");
 
-            for (int i = old; i < payload.Length; i++)
-                payload[i] = 0xAB;
+            Payload = data;
 
-            return old;
+            uint decompressedLength = (uint)Payload.Length;
+            Compress();
+
+            Payload = BitConverter.GetBytes(decompressedLength)
+                .Concat(Payload)
+                .ToArray();
+
+            Round1(false);
+            Round2(false);
+
+            decompressedLength = (uint)Payload.Length;
+            Compress();
+
+            Payload = ChunkHeader.Serialise()
+                .Concat(BitConverter.GetBytes(Payload.Length))
+                .Concat(Payload)
+                .Concat(BitConverter.GetBytes(decompressedLength))
+                .ToArray();
         }
 
         /// <summary>
-        /// Decrypt payload with first round keys in chunk header.
+        /// Encrypt or decrypt payload with first round keys in chunk header.
         /// </summary>
-        private void DecryptRound1()
+        private void Round1(bool decrypt)
         {
-            int old = Resize();
-            Console.WriteLine($"Decryption Round 1 - Id:{chunkHeader.Id}, Key:0x{chunkHeader.Key1:X4},0x{chunkHeader.Key2:X4},0x{chunkHeader.Key3:X4}");
+            Console.WriteLine($"Decryption Round 1 - Id:{ChunkHeader.Id}, Key:0x{ChunkHeader.Key1:X4},0x{ChunkHeader.Key2:X4},0x{ChunkHeader.Key3:X4}");
 
-            uint v7 = chunkHeader.Key1;
-            for (int i = 0; i < payload.Length; i += sizeof(int))
+            uint v7 = ChunkHeader.Key1;
+            for (int i = 0; i < Payload.Length >> 2; i++)
             {
-                v7 = chunkHeader.Key3 + (chunkHeader.Key2 ^ v7);
+                v7 = ChunkHeader.Key3 + (ChunkHeader.Key2 ^ v7);
 
-                uint value = BitConverter.ToUInt32(payload, i);
-                value += v7 * (uint)(i / sizeof(int) + 1);
+                uint value = BitConverter.ToUInt32(Payload, i * sizeof(int));
 
-                Buffer.BlockCopy(BitConverter.GetBytes(value), 0, payload, i, sizeof(int));
+                if (decrypt)
+                    value += v7 * (uint)(i + 1);
+                else
+                    value -= v7 * (uint)(i + 1);
+
+                Buffer.BlockCopy(BitConverter.GetBytes(value), 0, Payload, i * sizeof(int), sizeof(int));
             }
-
-            Array.Resize(ref payload, old);
         }
 
         /// <summary>
-        /// Decrypt payload with second round keys hard coded in server.
+        /// Encrypt or decrypt payload with second round keys hard coded in server.
         /// </summary>
-        private void DecryptRound2()
+        private void Round2(bool decrypt)
         {
-            int old = Resize();
-
-            (uint Key1, uint Key2) round2DecryptionKeys = Round2DecryptionKeys[chunkHeader.Id];
+            (uint Key1, uint Key2) round2DecryptionKeys = Round2DecryptionKeys[ChunkHeader.Id];
             uint key1 = round2DecryptionKeys.Key1;
             uint key2 = round2DecryptionKeys.Key2;
 
-            Console.WriteLine($"Decryption Round 2 - Id:{chunkHeader.Id}, Key:0x{key1:X4},0x{key2:X4}");
+            Console.WriteLine($"Decryption Round 2 - Id:{ChunkHeader.Id}, Key:0x{key1:X4},0x{key2:X4}");
 
-            for (int i = 0; i < payload.Length; i += sizeof(int))
+            for (int i = 0; i < Payload.Length >> 2; i++)
             {
-                uint v13 = key1 * (uint)(i / sizeof(int) + 1);
+                uint v13 = key1 * (uint)(i + 1);
                 key1 = key1 ^ key2;
 
-                uint value = BitConverter.ToUInt32(payload, i);
-                value += v13;
+                uint value = BitConverter.ToUInt32(Payload, i * sizeof(int));
 
-                Buffer.BlockCopy(BitConverter.GetBytes(value), 0, payload, i, sizeof(int));
+                if (decrypt)
+                    value += v13;
+                else
+                    value -= v13;
+
+                Buffer.BlockCopy(BitConverter.GetBytes(value), 0, Payload, i * sizeof(int), sizeof(int));
             }
-
-            Array.Resize(ref payload, old);
         }
 
-        /// <summary>
-        /// Deflate payload before the two rounds of encryption
-        /// </summary>
-        private void DeflateRound1(uint decompressedPayloadSize)
+        private void Decompress(uint decompressedPayloadSize)
         {
-            Console.WriteLine("Deflate Round 1...");
+            Console.WriteLine("Decompressing payload...");
 
-            ZlibProvider.Deflate(payload, out byte[] decompressedPayload);
-
-            // chunk 9 doesn't match, probably a fuckup somewhere
-            if (decompressedPayloadSize != decompressedPayload.Length && chunkHeader.Id != 9)
-                throw new InvalidDataException("Decompressed payload size doesn't match payload!");
-
-            payload = decompressedPayload;
-        }
-
-        /// <summary>
-        /// Deflate payload after the two rounds of encryption.
-        /// </summary>
-        private void DeflateRound2()
-        {
-            Console.WriteLine("Deflate Round 2...");
-
-            uint decompressedPayloadSize = BitConverter.ToUInt32(payload, 0);
-
-            // skip size
-            byte[] moobar = new byte[payload.Length - sizeof(int)];
-            Buffer.BlockCopy(payload, sizeof(int), moobar, 0, payload.Length - sizeof(int));
-
-            ZlibProvider.Deflate(moobar, out byte[] decompressedPayload);
+            byte[] decompressedPayload = ZlibProvider.Decompress(Payload);
             if (decompressedPayloadSize != decompressedPayload.Length)
                 throw new InvalidDataException("Decompressed payload size doesn't match payload!");
 
-            payload = decompressedPayload;
+            Payload = decompressedPayload;
+        }
+
+        private void Compress()
+        {
+            Console.WriteLine("Compressing payload...");
+            Payload = ZlibProvider.Compress(Payload);
         }
     }
 }
